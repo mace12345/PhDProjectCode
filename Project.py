@@ -10,6 +10,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 from scipy.optimize import basinhopping
+import os
 
 
 class ProcessCompounds:
@@ -605,12 +606,9 @@ class ProcessCompounds:
             # Add bonds if there is the right amount of coordinating atoms to metal centre
             if len(bonding_atoms) == number_of_bonds_formed:
                 for atom in bonding_atoms:
-                    try:
-                        ProcessCompounds.RemoveProtonfromONS(
-                            self, atom=atom, molecule=molecule
-                        )
-                    except TypeError:
-                        print(type(atom))
+                    ProcessCompounds.RemoveProtonfromONS(
+                        self, atom=atom, molecule=molecule
+                    )
                     b_id = molecule.add_bond(Bond.BondType(1), m_id, atom)
 
             # Most of the time there are more potential coordinating atoms
@@ -811,10 +809,255 @@ class ProcessCompounds:
                 f.write(string + "\n")
             f.close()
 
+    def AddWaterAlongZAxis(
+        self,
+        Add_north_water=False,
+        Add_south_water=False,
+        bond_dist=1,
+        output_file_name="added_water_ligands",
+    ):
+        for molecule in self.molecules:
+            metal = molecule.atoms[-1]
+            if Add_north_water == True and Add_south_water == False:
+                label = "ON"
+                oxygen = Atom("O", coordinates=(0, 0, bond_dist * 1), label=label)
+                oxygen_id = molecule.add_atom(oxygen)
+                bond_id = molecule.add_bond(Bond.BondType(1), metal, oxygen_id)
+                molecule.add_hydrogens(mode="all", add_sites=True)
+            elif Add_south_water == True and Add_north_water == False:
+                label = "OS"
+                oxygen = Atom("O", coordinates=(0, 0, bond_dist * -1), label=label)
+                oxygen_id = molecule.add_atom(oxygen)
+                bond_id = molecule.add_bond(Bond.BondType(1), metal, oxygen_id)
+                molecule.add_hydrogens(mode="all", add_sites=True)
+            elif Add_north_water == True and Add_south_water == True:
+                Noxygen = Atom("O", coordinates=(0, 0, bond_dist), label="ON")
+                Soxygen = Atom("O", coordinates=(0, 0, -bond_dist), label="OS")
+                N_id = molecule.add_atom(Noxygen)
+                S_id = molecule.add_atom(Soxygen)
+                Nb_id = molecule.add_bond(Bond.BondType(1), metal, N_id)
+                Sb_id = molecule.add_bond(Bond.BondType(1), metal, S_id)
+                molecule.add_hydrogens(mode="all", add_sites=True)
+            else:
+                raise Exception(
+                    "Water can only be North or South or both, 1 or -1 or 0"
+                )
+        with open(self.save_to_location + output_file_name + ".mol2", "w") as f:
+            for molecule in self.molecules:
+                string = molecule.to_string("mol2")
+                f.write(string + "\n")
+            f.close()
+
+    def mol2_to_openbabel(self, output_dir_name, keywords, maxiter):
+        try:
+            os.mkdir(self.save_to_location + output_dir_name)
+        except FileExistsError:
+            pass
+        bat_script = (
+            "@echo off\n"
+            + "cd "
+            + '"'
+            + self.save_to_location
+            + output_dir_name
+            + '"'
+            + "\n"
+        )
+        for molecule in self.molecules:
+            identifier = molecule.identifier
+            mol2_string = molecule.to_string("mol2")
+            bat_script = (
+                bat_script
+                + keywords
+                + " "
+                + identifier
+                + ".mol2 > "
+                + identifier
+                + "-openbabelOutput.mol2 -x "
+                + str(maxiter)
+                + " 2> "
+                + identifier
+                + "-openbabelOutput.txt\n"
+            )
+            with open(
+                self.save_to_location + output_dir_name + "/" + identifier + ".mol2",
+                "w",
+            ) as f:
+                f.write(mol2_string)
+                f.close()
+        with open(
+            self.save_to_location + output_dir_name + "/openbabel_run.bat", "w"
+        ) as f:
+            f.write(bat_script)
+            f.close()
+        # Optimise using openbabel UFF in the command line
+        # 'conda activate rdkit-env' This is where obminimize function exists
+        # conda activate C:\ProgramData\Anaconda3\envs\rdkit-env (manually)
+        # run the PreOptOutput file (manually)
+        # The output files from openbabel UFF loose formal charges.
+        # This should not matter as we will already have used ccdc
+        # to work out the formal charges
+
+    def RemoveImpossibleComplexes(self, metal_centre, output_file_name):
+        # removes complexes where the non-bonding atoms to the metal centre are closer than the bonding atoms to the metal centre
+        remove_molecule_index = []
+        for index, molecule in enumerate(self.molecules):
+            m_atom = None
+            for atom in molecule.atoms:
+                if atom.atomic_symbol == metal_centre:
+                    m_atom = atom
+                    break
+            atoms = molecule.atoms
+            coor_atom_BD = []
+            coor_atom_labels = []
+            for atom in m_atom.neighbours:
+                coor_atom_BD.append(
+                    np.linalg.norm(
+                        np.array(atom.coordinates) - np.array(m_atom.coordinates)
+                    )
+                )
+                coor_atom_labels.append(atom.label)
+            remove_atom_index = []
+            for coor_atom_label in coor_atom_labels:
+                for idx, atom in enumerate(atoms):
+                    if atom.label == coor_atom_label:
+                        remove_atom_index.append(idx)
+            for idx, atom in enumerate(atoms):
+                if atom.label == m_atom.label:
+                    remove_atom_index.append(idx)
+            remove_atom_index.reverse()
+            for idx in remove_atom_index:
+                del atoms[idx]
+
+            non_coor_atom_BD = []
+            for atom in atoms:
+                non_coor_atom_BD.append(
+                    np.linalg.norm(
+                        np.array(atom.coordinates) - np.array(m_atom.coordinates)
+                    )
+                )
+            try:
+                if min(non_coor_atom_BD) < min(coor_atom_BD):
+                    remove_molecule_index.append(index)
+            except ValueError:
+                pass
+        remove_molecule_index.reverse()
+        for idx in remove_molecule_index:
+            del self.molecules[idx]
+        print(len(self.molecules))
+        new_mol_file = ""
+        for molecule in self.molecules:
+            new_mol_file = new_mol_file + molecule.to_string("mol2")
+        with open(self.save_to_location + output_file_name + ".mol2", "w") as f:
+            f.write(new_mol_file)
+            f.close()
+
 
 class AnalyseCompounds:
     def __init__(self) -> None:
         pass
+
+    def RotateVector(self, vector_to_rotate, rotation_axis, theta):
+        x, y, z = rotation_axis[0], rotation_axis[1], rotation_axis[2]
+        theta = -theta
+        rotation_matrix = np.array(
+            [
+                [
+                    np.cos(theta) + (x**2) * (1 - np.cos(theta)),
+                    x * y * (1 - np.cos(theta)) - z * np.sin(theta),
+                    x * z * (1 - np.cos(theta)) + y * np.sin(theta),
+                ],
+                [
+                    y * x * (1 - np.cos(theta)) + z * np.sin(theta),
+                    np.cos(theta) + (y**2) * (1 - np.cos(theta)),
+                    y * z * (1 - np.cos(theta)) - x * np.sin(theta),
+                ],
+                [
+                    z * x * (1 - np.cos(theta)) - y * np.sin(theta),
+                    z * y * (1 - np.cos(theta)) + x * np.sin(theta),
+                    np.cos(theta) + (z**2) * (1 - np.cos(theta)),
+                ],
+            ]
+        ).reshape((3, 3))
+        return rotation_matrix @ vector_to_rotate
+
+    def resultant_vector(self, vectors_1, vectors_2):
+        return np.array(
+            [
+                [np.linalg.norm(np.array(i) + np.array(j)) for j in vectors_2]
+                for i in vectors_1
+            ]
+        )
+
+    def find_max_resultant_vector(self, matrix):
+        size = matrix.shape[0]
+        tot_resultant_vector = 0
+        for _ in range(0, size):
+            max = np.amax(matrix)
+            tot_resultant_vector = tot_resultant_vector + max
+            max_index = np.argmax(matrix)
+            indicies_of_max = np.unravel_index(max_index, matrix.shape)
+            mat_size = matrix.shape[0]
+            matrix = np.delete(matrix, indicies_of_max[0], axis=0)
+            matrix = np.delete(matrix, indicies_of_max[1], axis=1)
+        return abs(tot_resultant_vector - size * 2)
+
+    def find_r(self, theta_phi, ideal_v, actual_v):
+        rotate_v = [
+            list(
+                self.RotateVector(
+                    vector_to_rotate=v,
+                    rotation_axis=np.array([0, 0, 1]),
+                    theta=np.deg2rad(theta_phi[0]),
+                )
+            )
+            for v in actual_v
+        ]
+        rotate_v = [
+            list(
+                self.RotateVector(
+                    vector_to_rotate=v,
+                    rotation_axis=np.array([0, 1, 0]),
+                    theta=np.deg2rad(theta_phi[1]),
+                )
+            )
+            for v in rotate_v
+        ]
+        return self.find_max_resultant_vector(self.resultant_vector(ideal_v, rotate_v))
+
+    def AnalysePointGroupDeviation(
+        self, metal_centre, ideal_point_groups, output_file_name
+    ):
+        df = pd.DataFrame(
+            columns=[pg[1] for pg in ideal_point_groups],
+            index=[molecule.identifier for molecule in self.mol2_molecules],
+        )
+        for molecule in self.mol2_molecules:
+            identifier = molecule.identifier
+            for atom in molecule.atoms:
+                if atom.atomic_symbol == metal_centre:
+                    m_atom = np.array(atom.coordinates)
+                    neighbour_atoms = atom.neighbours
+                    neighbour_atoms = [np.array(i.coordinates) for i in neighbour_atoms]
+                    # move neighbour atoms to where metal atom is at position 0,0,0
+                    neighbour_atoms = [i - m_atom for i in neighbour_atoms]
+                    # normalise the neighbour atom vectors so they have a magnitude of 1
+                    neighbour_atoms = [i / np.linalg.norm(i) for i in neighbour_atoms]
+                    break
+            for ideal_pg in ideal_point_groups:
+                pg_vectors = ideal_pg[0]
+                pg_name = ideal_pg[1]
+                results = basinhopping(
+                    func=self.find_r,
+                    x0=[0, 0],
+                    minimizer_kwargs={
+                        "method": "L-BFGS-B",
+                        "args": (pg_vectors, neighbour_atoms),
+                    },
+                    niter=100,
+                    stepsize=100,
+                )
+                df.loc[identifier, pg_name] = results.fun
+        df.to_csv(self.save_to_location + output_file_name + ".csv")
 
 
 if __name__ == "__main__":
@@ -823,15 +1066,11 @@ if __name__ == "__main__":
     complexes = ProcessCompounds(
         read_from_location="C:/Users/cmsma/OneDrive - University of Leeds/Samuel Mace PhD Project/Please_delete_this_folder/",
         save_to_location="C:/Users/cmsma/OneDrive - University of Leeds/Samuel Mace PhD Project/Please_delete_this_folder/",
-        mol2_file="filtered_ligand_set.mol2",
+        mol2_file="with_metal.mol2",
     )
 
-    complexes.AddMetalCentre(
-        metal="Mn",
-        oxidation_state=2,
-        max_bond_dist=3.81,
-        output_file_name="with_metal",
-        number_of_bonds_formed=5,
+    complexes.RemoveImpossibleComplexes(
+        metal_centre="Mn", output_file_name="filtered_complexes"
     )
 
 end = perf_counter()
